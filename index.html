@@ -60,7 +60,7 @@
         <canvas id="overlay"></canvas>
         <div class="placeholder" id="ph">Tap <b>&nbsp;Start camera&nbsp;</b> below</div>
       </div>
-      <p class="hint">Drag a box tightly around the <b>temperature digits only</b> (inside the screen, not the plastic edge). Hold the phone steady and avoid glare.</p>
+      <p class="hint">Drag a box around the <b>big temperature number</b> (e.g. 70.9 °F). It's OK if a little of the frame or the small min/max row gets in. Hold steady and avoid glare.</p>
       <div class="btns">
         <button class="primary" id="startBtn">Start camera</button>
         <button id="stopBtn" disabled>Stop</button>
@@ -106,13 +106,13 @@
           <option value="dark">Dark digits on light screen (LCD)</option>
           <option value="light">Light digits on dark screen (LED / backlit)</option>
         </select>
-        <label for="thr">Contrast threshold: <span id="thrV">auto</span></label>
-        <input type="range" id="thr" min="0" max="250" value="0">
+        <label for="sens">Sensitivity: <span id="sensV">auto</span> <span style="opacity:.7">(leave on auto unless it struggles)</span></label>
+        <input type="range" id="sens" min="0" max="35" value="0">
         <label for="slant">Digit slant correction: <span id="slantV">0°</span></label>
         <input type="range" id="slant" min="-5" max="20" value="0">
         <label for="decimals">Decimal places on display</label>
         <select id="decimals">
-          <option value="auto">Auto (use detected dot)</option>
+          <option value="auto">Auto (use detected dot / small last digit)</option>
           <option value="0">0 (e.g. 68)</option>
           <option value="1">1 (e.g. 68.4)</option>
         </select>
@@ -127,9 +127,12 @@
           </div>
         </div>
         <div class="row">
-          <div><label for="minV">Ignore readings below</label><input type="number" id="minV" value="-40"></div>
-          <div><label for="maxV">Ignore readings above</label><input type="number" id="maxV" value="150"></div>
+          <div><label for="minV">Ignore readings below</label><input type="number" id="minV" value="32"></div>
+          <div><label for="maxV">Ignore readings above</label><input type="number" id="maxV" value="120"></div>
         </div>
+        <label for="minDigits">Digits before the decimal point (at least)</label>
+        <select id="minDigits"><option value="1">1</option><option value="2" selected>2 (e.g. 68, 70.9)</option><option value="3">3</option></select>
+        <div class="btns"><button id="resetBtn">Reset settings</button></div>
       </details>
 
       <details>
@@ -146,36 +149,41 @@
   const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
   const debug = $('debug'), dctx = debug.getContext('2d');
   const work = document.createElement('canvas'), wctx = work.getContext('2d', { willReadFrequently: true });
+  const SKEY = 'thermo-settings-v2';
 
   // ---------- settings persistence ----------
-  const KEYS = ['limit','dir','engine','polarity','thr','slant','decimals','confirm','fps','minV','maxV','soundOn'];
+  const KEYS = ['limit','dir','engine','polarity','sens','slant','decimals','confirm','fps','minV','maxV','minDigits','soundOn'];
+  let roi = {x:0.3, y:0.35, w:0.4, h:0.3}; // normalized to video frame
   function loadSettings(){
     try{
-      const s = JSON.parse(localStorage.getItem('thermo-settings')||'{}');
-      KEYS.forEach(k => { if (s[k]!==undefined){ const el=$(k); if(el.type==='checkbox') el.checked=s[k]; else el.value=s[k]; }});
-      if (s.roi) roi = s.roi;
+      const s = JSON.parse(localStorage.getItem(SKEY)||'null');
+      if (s){
+        KEYS.forEach(k => { if (s[k]!==undefined){ const el=$(k); if(el.type==='checkbox') el.checked=s[k]; else el.value=s[k]; }});
+        if (s.roi) roi = s.roi;
+      } else {
+        const old = JSON.parse(localStorage.getItem('thermo-settings')||'{}'); // keep old box + limit only
+        if (old.roi) roi = old.roi;
+        if (old.limit) $('limit').value = old.limit;
+        if (old.dir) $('dir').value = old.dir;
+      }
     }catch(e){}
   }
   function saveSettings(){
     try{
       const s = {roi};
       KEYS.forEach(k => { const el=$(k); s[k] = el.type==='checkbox' ? el.checked : el.value; });
-      localStorage.setItem('thermo-settings', JSON.stringify(s));
+      localStorage.setItem(SKEY, JSON.stringify(s));
     }catch(e){}
   }
+  loadSettings();
+  KEYS.forEach(k => $(k).addEventListener('change', () => { saveSettings(); updateLabels(); resetConfirm(); }));
+  ['sens','slant'].forEach(k => $(k).addEventListener('input', updateLabels));
+  function updateLabels(){ $('sensV').textContent = +$('sens').value ? $('sens').value+'%' : 'auto'; $('slantV').textContent = $('slant').value + '°'; }
+  updateLabels();
+  $('resetBtn').onclick = () => { try{ localStorage.removeItem(SKEY); localStorage.removeItem('thermo-settings'); }catch(e){} location.reload(); };
 
   // ---------- region of interest ----------
-  let roi = {x:0.3, y:0.35, w:0.4, h:0.3}; // normalized to video frame
   let drag = null;
-  loadSettings();
-  KEYS.forEach(k => $(k).addEventListener('change', () => { saveSettings(); updateLabels(); }));
-  ['thr','slant'].forEach(k => $(k).addEventListener('input', updateLabels));
-  function updateLabels(){
-    $('thrV').textContent = +$('thr').value === 0 ? 'auto' : $('thr').value;
-    $('slantV').textContent = $('slant').value + '°';
-  }
-  updateLabels();
-
   function sizeOverlay(){
     const r = overlay.getBoundingClientRect();
     overlay.width = r.width * devicePixelRatio; overlay.height = r.height * devicePixelRatio;
@@ -217,7 +225,7 @@
     unlockAudio();
     try{
       const v = deviceId ? {deviceId:{exact:deviceId}} : {facingMode:{ideal:'environment'}};
-      stream = await navigator.mediaDevices.getUserMedia({video:{...v, width:{ideal:1280}, height:{ideal:720}}, audio:false});
+      stream = await navigator.mediaDevices.getUserMedia({video:{...v, width:{ideal:1920}, height:{ideal:1080}}, audio:false});
     }catch(err){
       setStatus('idle', 'Camera blocked: ' + err.message + '. Allow camera access and try again.');
       return;
@@ -230,7 +238,7 @@
     if (st && st.deviceId) $('camSel').value = st.deviceId;
     setTimeout(sizeOverlay, 300);
     try{ if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){}
-    setStatus('idle','Watching… adjust the box around the digits');
+    setStatus('idle','Watching… adjust the box around the big number');
     schedule();
   }
   function stopCam(silent){
@@ -256,108 +264,260 @@
   }
 
   // ---------- image processing ----------
-  function grabBinary(){
+  // 1) crop + deskew + grayscale + blur, 2) local (adaptive) contrast so glare/shadows don't matter
+  function grab(){
     const vw = video.videoWidth, vh = video.videoHeight;
     if (!vw || !vh) return null;
     const sx = roi.x*vw, sy = roi.y*vh, sw = roi.w*vw, sh = roi.h*vh;
-    const H = 96, W = Math.max(24, Math.round(H * sw/sh));
+    const H = 160, W = Math.max(40, Math.min(640, Math.round(H * sw/sh)));
     work.width = W; work.height = H;
-    const k = Math.tan((+$('slant').value) * Math.PI/180);
-    wctx.setTransform(1,0,k,1,-k*H/2,0);
-    wctx.fillStyle = '#888'; wctx.fillRect(-W,0,W*3,H);
     wctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
-    wctx.setTransform(1,0,0,1,0,0);
-    const img = wctx.getImageData(0,0,W,H), d = img.data;
-    const g = new Uint8Array(W*H);
-    for (let i=0,j=0;i<d.length;i+=4,j++) g[j] = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)|0;
-    // light blur (box 3x3) to reduce noise
-    const b = new Uint8Array(W*H);
-    for (let y=0;y<H;y++) for (let x=0;x<W;x++){
-      let s=0,n=0;
-      for (let dy=-1;dy<=1;dy++){ const yy=y+dy; if(yy<0||yy>=H) continue;
-        for (let dx=-1;dx<=1;dx++){ const xx=x+dx; if(xx<0||xx>=W) continue; s+=g[yy*W+xx]; n++; } }
-      b[y*W+x] = s/n;
-    }
-    let t = +$('thr').value;
-    if (!t) t = otsu(b);
-    let pol = $('polarity').value;
-    let darkCount = 0; for (let i=0;i<b.length;i++) if (b[i] < t) darkCount++;
-    if (pol==='auto') pol = darkCount <= b.length/2 ? 'dark' : 'light';
-    const bin = new Uint8Array(W*H);
-    for (let i=0;i<b.length;i++) bin[i] = pol==='dark' ? (b[i] < t ? 1:0) : (b[i] >= t ? 1:0);
-    // clear a thin border so the display frame doesn't count as a digit
-    const m = 2;
-    for (let y=0;y<H;y++) for (let x=0;x<W;x++) if (x<m||y<m||x>=W-m||y>=H-m) bin[y*W+x]=0;
-    return {bin, W, H, t, pol};
+    const d = wctx.getImageData(0,0,W,H).data;
+    const g = new Float32Array(W*H);
+    for (let i=0,j=0;i<d.length;i+=4,j++) g[j] = d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114;
+    const b = boxBlur(g, W, H, 1);
+    const r = Math.max(4, Math.round(H/7));        // local window radius
+    const mean = boxBlur(b, W, H, r);
+    return {W, H, g:b, mean};
   }
-  function otsu(px){
-    const hist = new Array(256).fill(0); px.forEach(v=>hist[v]++);
-    const total = px.length; let sum=0; for(let i=0;i<256;i++) sum+=i*hist[i];
-    let sumB=0,wB=0,max=0,thr=127;
-    for (let i=0;i<256;i++){
-      wB+=hist[i]; if(!wB) continue; const wF=total-wB; if(!wF) break;
-      sumB+=i*hist[i]; const mB=sumB/wB, mF=(sum-sumB)/wF; const between=wB*wF*(mB-mF)*(mB-mF);
-      if (between>max){max=between;thr=i;}
+  function boxBlur(src, W, H, r){
+    // integral-image box blur
+    const I = new Float64Array((W+1)*(H+1));
+    for (let y=0;y<H;y++){ let row=0; for (let x=0;x<W;x++){ row += src[y*W+x]; I[(y+1)*(W+1)+x+1] = I[y*(W+1)+x+1] + row; } }
+    const out = new Float32Array(W*H);
+    for (let y=0;y<H;y++){ const y0=Math.max(0,y-r), y1=Math.min(H,y+r+1);
+      for (let x=0;x<W;x++){ const x0=Math.max(0,x-r), x1=Math.min(W,x+r+1);
+        const s = I[y1*(W+1)+x1]-I[y0*(W+1)+x1]-I[y1*(W+1)+x0]+I[y0*(W+1)+x0];
+        out[y*W+x] = s/((x1-x0)*(y1-y0)); } }
+    return out;
+  }
+  function inkMap(o, pol){
+    const {g, mean, W, H} = o, ink = new Float32Array(W*H);
+    for (let i=0;i<ink.length;i++){ const m = mean[i]+8; const v = pol==='dark' ? (m-g[i])/m : (g[i]-m)/m; ink[i] = v>0?v:0; }
+    return ink;
+  }
+  // connected components (8-neighbour). returns {labels, comps}
+  function cc(bin, W, H){
+    const labels = new Int32Array(W*H), comps=[], stack = new Int32Array(W*H);
+    let next=0;
+    for (let i=0;i<bin.length;i++){
+      if (!bin[i] || labels[i]) continue;
+      next++; let sp=0; stack[sp++]=i; labels[i]=next;
+      const c={id:next,x0:W,y0:H,x1:0,y1:0,n:0};
+      while(sp){
+        const p=stack[--sp], x=p%W, y=(p/W)|0; c.n++;
+        if(x<c.x0)c.x0=x; if(x>c.x1)c.x1=x; if(y<c.y0)c.y0=y; if(y>c.y1)c.y1=y;
+        for (let dy=-1;dy<=1;dy++){ const yy=y+dy; if(yy<0||yy>=H) continue;
+          for (let dx=-1;dx<=1;dx++){ const xx=x+dx; if(xx<0||xx>=W) continue; const q=yy*W+xx;
+            if (bin[q] && !labels[q]){ labels[q]=next; stack[sp++]=q; } } }
+      }
+      c.w=c.x1-c.x0+1; c.h=c.y1-c.y0+1; comps.push(c);
     }
-    return thr;
+    return {labels, comps};
+  }
+  function dilate(bin, W, H, r){
+    const t = new Uint8Array(W*H), o = new Uint8Array(W*H);
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){ let v=0; for (let d=-r;d<=r&&!v;d++){ const xx=x+d; if(xx>=0&&xx<W&&bin[y*W+xx]) v=1; } t[y*W+x]=v; }
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){ let v=0; for (let d=-r;d<=r&&!v;d++){ const yy=y+d; if(yy>=0&&yy<H&&t[yy*W+x]) v=1; } o[y*W+x]=v; }
+    return o;
   }
 
   // 7-segment patterns: bits a b c d e f g
   const SEG = {
     '1111110':'0','0110000':'1','1101101':'2','1111001':'3','0110011':'4','1011011':'5',
     '1011111':'6','0011111':'6','1110000':'7','1110010':'7','1111111':'8','1111011':'9','1110011':'9',
-    '0000001':'-','1000111':'F','1001110':'C','1001111':'E','0001110':'L','1100111':'P'
+    '1000111':'F','1001110':'C','1001111':'E','0001110':'L','1100111':'P','1100011':'°'
   };
   const REG = { // x0,x1,y0,y1 as fractions of the digit box
-    a:[.3,.7,0,.16], b:[.68,1,.14,.44], c:[.68,1,.56,.86], d:[.3,.7,.84,1],
-    e:[0,.32,.56,.86], f:[0,.32,.14,.44], g:[.3,.7,.42,.58]
+    a:[.28,.72,0,.18], b:[.66,1,.12,.44], c:[.66,1,.56,.88], d:[.28,.72,.82,1],
+    e:[0,.34,.56,.88], f:[0,.34,.12,.44], g:[.28,.72,.41,.59]
   };
-  function decodeSeg(o){
-    const {bin, W, H} = o;
-    const col = new Array(W).fill(0);
-    for (let x=0;x<W;x++){ let s=0; for (let y=0;y<H;y++) s+=bin[y*W+x]; col[x]=s; }
-    const minCol = Math.max(1, H*0.03);
-    // runs of occupied columns, merged across small gaps
-    let runs=[], inR=false, s0=0;
-    for (let x=0;x<=W;x++){
-      const on = x<W && col[x]>=minCol;
-      if (on && !inR){ inR=true; s0=x; }
-      if (!on && inR){ inR=false; runs.push([s0,x-1]); }
+  function readDigit(c, ink, bin, W){
+    if (c.w/c.h < 0.34) return '1';
+    const sc = {};
+    let m = 0;
+    for (const k in REG){
+      const [fx0,fx1,fy0,fy1]=REG[k];
+      const X0=Math.round(c.x0+fx0*c.w), X1=Math.max(X0+1,Math.round(c.x0+fx1*c.w));
+      const Y0=Math.round(c.y0+fy0*c.h), Y1=Math.max(Y0+1,Math.round(c.y0+fy1*c.h));
+      let s=0,f=0,n=0; for(let y=Y0;y<Y1;y++) for(let x=X0;x<X1;x++){ const i=y*W+x; s+=ink[i]; f+=bin[i]; n++; }
+      sc[k] = {s:n?s/n:0, f:n?f/n:0}; if (sc[k].s>m) m=sc[k].s;
     }
-    const gap = Math.max(2, H*0.06);
-    const merged=[];
-    runs.forEach(r => { const L=merged[merged.length-1]; if (L && r[0]-L[1] <= gap) L[1]=r[1]; else merged.push([r[0],r[1]]); });
-    // vertical extents
-    const comps = merged.map(([x0,x1]) => {
-      const w = x1-x0+1; let y0=-1,y1=-1, px=0;
-      for (let y=0;y<H;y++){ let s=0; for (let x=x0;x<=x1;x++) s+=bin[y*W+x]; px+=s; if (s>=Math.max(1,w*0.08)){ if(y0<0) y0=y; y1=y; } }
-      return {x0,x1,y0,y1,w,h:y1-y0+1,px};
-    }).filter(c => c.y0>=0 && c.px > 6);
-    if (!comps.length) return {text:'', boxes:[]};
-    const digitH = Math.max(...comps.map(c=>c.h));
-    const bottom = Math.max(...comps.filter(c=>c.h>digitH*0.7).map(c=>c.y1));
-    let text='', boxes=[];
+    let bits=''; for (const k of 'abcdefg') bits += (sc[k].s > 0.42*m && sc[k].f > 0.12) ? '1':'0';
+    return SEG[bits] || '?';
+  }
+  function decode(o, pol, k){
+    const {W, H} = o; let ink = inkMap(o, pol);
+    let bin = new Uint8Array(W*H);
+    for (let i=0;i<bin.length;i++) bin[i] = ink[i] > k ? 1 : 0;
+    // cut long straight frame lines (display border, section dividers). No digit stroke is longer than ~0.75 of the box height.
+    const L = 0.75*H;
+    const band = new Uint8Array(W*H);
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=y*W+x; band[i] = bin[i] | (y>0?bin[i-W]:0) | (y<H-1?bin[i+W]:0); }
+    for (let y=0;y<H;y++){ let s=-1; for (let x=0;x<=W;x++){ const on = x<W && band[y*W+x];
+      if (on && s<0) s=x; if (!on && s>=0){ if (x-s > L) for (let q=s;q<x;q++) bin[y*W+q]=0; s=-1; } } }
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=y*W+x; band[i] = bin[i] | (x>0?bin[i-1]:0) | (x<W-1?bin[i+1]:0); }
+    for (let x=0;x<W;x++){ let s=-1; for (let y=0;y<=H;y++){ const on = y<H && band[y*W+x];
+      if (on && s<0) s=y; if (!on && s>=0){ if (y-s > 0.92*H) for (let q=s;q<y;q++) bin[q*W+x]=0; s=-1; } } }
+    // straighten slanted (italic) digits
+    const sl = Math.tan((+$('slant').value) * Math.PI/180);
+    if (sl){
+      const nb = new Uint8Array(W*H), ni = new Float32Array(W*H);
+      for (let y=0;y<H;y++){ const off = Math.round(sl*(y-H/2));
+        for (let x=0;x<W;x++){ const sx=x-off; if (sx<0||sx>=W) continue; nb[y*W+x]=bin[y*W+sx]; ni[y*W+x]=ink[y*W+sx]; } }
+      bin = nb; ink = ni;
+    }
+    // remove blobs touching the box edge, straight lines, glare patches, specks
+    let {labels, comps} = cc(bin, W, H);
+    const keep = [];
     for (const c of comps){
-      let ch = '';
-      if (c.h >= digitH*0.7){
-        if (c.w/c.h < 0.33) ch = '1';
-        else {
-          let bits='';
-          for (const k of 'abcdefg'){
-            const [fx0,fx1,fy0,fy1]=REG[k];
-            const X0=Math.round(c.x0+fx0*c.w), X1=Math.max(X0+1,Math.round(c.x0+fx1*c.w));
-            const Y0=Math.round(c.y0+fy0*c.h), Y1=Math.max(Y0+1,Math.round(c.y0+fy1*c.h));
-            let on=0,n=0; for(let y=Y0;y<Y1&&y<H;y++) for(let x=X0;x<X1&&x<W;x++){ on+=bin[y*W+x]; n++; }
-            bits += (n && on/n > 0.3) ? '1':'0';
-          }
-          ch = SEG[bits] || '?';
-        }
-      } else if (c.h < digitH*0.3 && c.w < digitH*0.3 && c.y1 >= bottom - digitH*0.15) ch = '.';
-      else if (c.h < digitH*0.3 && c.w >= digitH*0.25 && Math.abs((c.y0+c.y1)/2 - (bottom-digitH/2)) < digitH*0.2) ch = '-';
-      else ch = ''; // degree sign, unit symbols, noise
-      if (ch){ text += ch; boxes.push({...c, ch}); }
+      // things cut by the box edge: frame/bezel pieces, or background — but keep digit-sized blobs so a tight box still works
+      const touches = (c.x0<=1 || c.y0<=1 || c.x1>=W-2 || c.y1>=H-2) &&
+        (c.h > 0.93*H || c.w > 0.5*W || Math.min(c.w,c.h) < 0.12*Math.max(c.w,c.h) || c.h < 0.25*H);
+      const dens = c.n/(c.w*c.h);
+      const hline = c.w > 4*c.h && c.w > 0.15*W;
+      const big = c.h > 0.95*H || c.w > 0.8*W;
+      const glare = dens > 0.8 && c.w/c.h > 0.45 && c.h > 0.2*H && c.w > 0.15*H;   // solid patch, not a digit
+      const hollow = dens < 0.1 && c.w*c.h > 0.03*W*H;           // outline / frame
+      if (!(touches || hline || big || glare || hollow || c.n < 5)) keep.push(c);
     }
-    return {text, boxes};
+    const clean = new Uint8Array(W*H), keepIds = new Set(keep.map(c=>c.id));
+    for (let i=0;i<bin.length;i++) if (bin[i] && keepIds.has(labels[i])) clean[i]=1;
+    if (!keep.length) return {text:'', boxes:[], clean, W, H, score:0};
+    // 1) find the band of rows holding the big number: start from the tallest digit-shaped piece,
+    //    then grow to include pieces that overlap it (handles digits drawn as separate LCD segments)
+    const cand = keep.filter(c => { const d=c.n/(c.w*c.h); return c.w/c.h < 1.8 && d > 0.08 && c.h >= 0.1*H; });
+    if (!cand.length) return {text:'', boxes:[], clean, W, H, score:0};
+    const edge = c => c.x0<=1 || c.y0<=1 || c.x1>=W-2 || c.y1>=H-2;
+    const maxCH = Math.max(...cand.map(c=>c.h));
+    let A = null, bestSc = -1;
+    for (const a of cand){ if (a.h < 0.25*maxCH) continue;
+      let sc = 0;
+      for (const c of cand) if (Math.abs(c.h-a.h) <= 0.25*a.h && Math.abs(c.y0-a.y0) <= 0.15*a.h && Math.abs(c.y1-a.y1) <= 0.15*a.h)
+        sc += (edge(c) ? 0.3 : 1) * c.h * Math.min(c.w, 0.7*c.h);
+      if (sc > bestSc){ bestSc = sc; A = a; } }
+    let top=A.y0, bottom=A.y1;
+    for (let grew=true; grew;){ grew=false;
+      for (const c of cand){ if (c.y0>=top && c.y1<=bottom) continue;
+        const ov = Math.min(c.y1,bottom)-Math.max(c.y0,top)+1;
+        if (ov >= 0.6*c.h && c.h >= 0.3*A.h){ const nt=Math.min(top,c.y0), nb=Math.max(bottom,c.y1);
+          if (nb-nt+1 <= 1.6*A.h+2 && (nt<top||nb>bottom)){ top=nt; bottom=nb; grew=true; } } } }
+    const D = bottom-top+1;
+    const inBand = new Uint8Array(W*H);
+    const bandIds = new Set(keep.filter(c => { const cy=(c.y0+c.y1)/2; return cy>=top-0.05*D && cy<=bottom+0.05*D && c.y0>=top-0.15*D && c.y1<=bottom+0.1*D; }).map(c=>c.id));
+    for (let i=0;i<clean.length;i++) if (clean[i] && bandIds.has(labels[i])) inBand[i]=1;
+    // 2) decimal points: small solid dots on the baseline, handled on their own
+    const dotComps = keep.filter(c => bandIds.has(c.id) && c.h < 0.22*D && c.w < 0.22*D && c.y1 >= bottom-0.12*D && c.n >= 4 && c.n/(c.w*c.h) > 0.4 && c.w/c.h >= 0.5 && c.w/c.h <= 2 && c.h >= 0.05*D);
+    // degree sign: tiny roundish mark at the top of the line — ignore it
+    const degComps = keep.filter(c => bandIds.has(c.id) && c.h <= 0.25*D && c.w <= 0.25*D && c.y0 <= top+0.15*D && c.w/c.h >= 0.5 && c.w/c.h <= 2);
+    const dotIds = new Set([...dotComps, ...degComps].map(c=>c.id));
+    for (let i=0;i<inBand.length;i++) if (inBand[i] && dotIds.has(labels[i])) inBand[i]=0;
+    // 3) split the band into character cells by empty columns
+    const col = new Array(W).fill(0);
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++) col[x]+=inBand[y*W+x];
+    const cells=[]; let s0=-1;
+    for (let x=0;x<=W;x++){ const on = x<W && col[x]>0; if (on && s0<0) s0=x; if (!on && s0>=0){ cells.push([s0,x-1]); s0=-1; } }
+    const box = (x0,x1,y0,y1) => { let a=W,b=-1,c=H,d=-1,n=0;
+      for (let y=Math.max(0,y0);y<=Math.min(H-1,y1);y++) for (let x=x0;x<=x1;x++) if (inBand[y*W+x]){ n++; if(x<a)a=x; if(x>b)b=x; if(y<c)c=y; if(y>d)d=y; }
+      return n>=5 ? {x0:a,x1:b,y0:c,y1:d,w:b-a+1,h:d-c+1,n} : null; };
+    const isDigit = ch => /\d/.test(ch);
+    // a smaller digit sitting on the baseline, possibly with "°F" above it (ThermoPro-style tenths)
+    function trySmall(cx0, cx1){
+      const r0 = Math.round(top+0.15*D), r1 = Math.round(top+0.5*D);
+      let cut=-1, best=1e9;
+      for (let y=r0;y<=r1;y++){ let s=0; for (let x=cx0;x<=cx1;x++) s+=inBand[y*W+x]; if (s<=best){ best=s; cut=y; } }
+      if (cut<0) return null;
+      const lo = box(cx0, cx1, cut+1, H-1);
+      if (!lo || lo.h < 0.45*D || lo.h > 0.8*D || Math.abs(lo.y1-bottom) > 0.15*D) return null;
+      const d = readDigit(lo, ink, clean, W);
+      return isDigit(d) ? {...lo, kind:'small', d} : null;
+    }
+    const glyphs = dotComps.map(c => ({...c, kind:'dot'}));
+    const fulls = cells.map(([a,b]) => box(a,b,0,H-1));
+    const ws = [];
+    fulls.forEach(f => { if (!f || f.h < 0.7*D || f.w/f.h < 0.4) return;
+      if (f.w/f.h > 0.85){ const n=Math.max(2,Math.round(f.w/(0.6*f.h))); for(let i=0;i<n;i++) ws.push(f.w/n); } else ws.push(f.w); });
+    ws.sort((a,b)=>a-b);
+    const bigW = ws.length ? ws[ws.length>>1] : 0.6*D;
+    let seenBig = false;
+    for (let ci=0; ci<cells.length; ci++){
+      const [cx0,cx1] = cells[ci], full = fulls[ci]; if (!full) continue;
+      if (full.h >= 0.7*D){
+        if (full.w/full.h > 0.85){
+          // digits touching each other ("70") -> split at the emptiest columns
+          const n = Math.max(2, Math.round(full.w/(0.6*full.h)));
+          const cc2 = new Array(full.w).fill(0);
+          for (let y=full.y0;y<=full.y1;y++) for (let x=full.x0;x<=full.x1;x++) cc2[x-full.x0] += inBand[y*W+x];
+          const cuts=[0];
+          for (let i=1;i<n;i++){ const mid=Math.round(i*full.w/n), r=Math.round(0.3*full.w/n); let bi=mid;
+            for (let x=Math.max(1,mid-r); x<=Math.min(full.w-2,mid+r); x++) if (cc2[x] < cc2[bi]) bi=x; cuts.push(bi); }
+          cuts.push(full.w);
+          for (let i=0;i<n;i++){ const b = box(full.x0+cuts[i], full.x0+cuts[i+1]-1, 0, H-1); if (b) glyphs.push({...b, kind:'big'}); }
+          seenBig = true;
+        } else {
+          const d = readDigit(full, ink, clean, W);
+          // after the main digits, a narrower digit on the baseline with "°F" stacked above it = tenths digit
+          const sm = seenBig ? trySmall(cx0, cx1) : null;
+          if (sm && sm.w <= 0.8*bigW) glyphs.push(sm);
+          else if (isDigit(d)) { glyphs.push({...full, kind:'big', d}); seenBig = true; }
+          else glyphs.push(sm || {...full, kind:'big', d});
+        }
+      } else {
+        const sm = trySmall(cx0, cx1);
+        glyphs.push(sm || {...full, kind:'other'});
+      }
+    }
+    glyphs.sort((a,b)=>a.x0-b.x0);
+    // 4) read left to right
+    let text='', boxes=[], sawDot=false, sawSmall=false;
+    for (const c of glyphs){
+      let ch='';
+      if (c.kind==='big') { if (!sawSmall) ch = c.d || readDigit(c, ink, clean, W); }
+      else if (c.kind==='small') { if (text.length && !sawSmall){ ch = (sawDot ? '' : '.') + c.d; sawSmall = true; } }
+      else if (c.kind==='dot') { if (text.length && !sawDot && !sawSmall){ ch='.'; sawDot=true; } }
+      else if (c.h < 0.3*D && c.w >= 0.25*D && !text.length && Math.abs((c.y0+c.y1)/2 - (bottom-D/2)) < 0.2*D) ch='-';
+      boxes.push({...c, ch: ch || '·', used: !!ch});
+      text += ch;
+    }
+    text = text.replace(/[FCELP°]/g,'').replace(/\.$/,'');
+    const nd = (text.match(/\d/g)||[]).length, nq = (text.match(/\?/g)||[]).length;
+    return {text, boxes, clean, W, H, score: nd - 3*nq};
+  }
+  // most of a display is background, so whichever side of the brightness split is the minority is the digits
+  function guessPolarity(o){
+    const {g} = o, hist = new Array(256).fill(0);
+    for (let i=0;i<g.length;i++) hist[Math.max(0,Math.min(255,g[i]|0))]++;
+    let sum=0; for(let i=0;i<256;i++) sum+=i*hist[i];
+    let sB=0,wB=0,best=0,t=127;
+    for (let i=0;i<256;i++){ wB+=hist[i]; if(!wB) continue; const wF=g.length-wB; if(!wF) break; sB+=i*hist[i];
+      const d=(sB/wB-(sum-sB)/wF); const v=wB*wF*d*d; if(v>best){best=v;t=i;} }
+    let dark=0; for (let i=0;i<=t;i++) dark+=hist[i];
+    return dark <= g.length/2 ? 'dark' : 'light';
+  }
+  function readFrame(o){
+    const pol = $('polarity').value, sens = +$('sens').value;
+    const ks = sens ? [sens/100] : [0.07, 0.10, 0.13, 0.16, 0.19, 0.23];
+    const runPol = p => ks.map(k => { const r = decode(o, p, k); r.k = k; r.pol = p; r.v = parseValue(r.text); return r; });
+    let runs;
+    if (pol !== 'auto') runs = runPol(pol);
+    else {
+      // try both; keep the colour setting under which more contrast levels give a readable number
+      const g = guessPolarity(o), d = runPol('dark'), l = runPol('light');
+      const n = rs => rs.filter(r=>r.v!==null).length*10 + rs.reduce((s,r)=>s+r.score,0);
+      runs = n(d) > n(l) ? d : n(l) > n(d) ? l : (g==='dark' ? d : l);
+    }
+    // the contrast levels vote; the number most of them agree on wins
+    const votes = new Map();
+    runs.forEach(r => { if (r.v !== null) votes.set(r.v, (votes.get(r.v)||0) + 1); });
+    let bestV = null, bestN = 0;
+    votes.forEach((n,v) => { if (n > bestN) { bestN = n; bestV = v; } });
+    const agreeing = runs.filter(r => r.v === bestV && bestV !== null);
+    const pick = agreeing.length ? agreeing[agreeing.length>>1] : runs.reduce((a,b)=> b.score>a.score ? b : a);
+    const valid = runs.filter(r=>r.v!==null).length;
+    // need at least two levels agreeing, and more agreeing than disagreeing
+    pick.trusted = bestV !== null && (ks.length === 1 || (bestN >= 2 && bestN > valid - bestN));
+    pick.votes = bestN + '/' + runs.length;
+    return pick;
   }
 
   // ---------- OCR (lazy) ----------
@@ -386,28 +546,30 @@
   async function tick(){
     if (busy || !stream) return; busy = true;
     try{
-      const o = grabBinary(); if (!o) return;
-      drawDebug(o);
-      let text='';
+      const o = grab(); if (!o) return;
+      const r = readFrame(o);
+      drawDebug(r);
+      let text = r.text;
       if ($('engine').value === 'ocr'){
         setRaw('loading OCR…');
         await loadOCR();
         const {data} = await ocrWorker.recognize(debug);
         text = (data.text||'').replace(/\s+/g,'');
-      } else {
-        const r = decodeSeg(o); text = r.text; drawBoxes(o, r.boxes);
       }
-      const v = parseValue(text);
-      setRaw('raw: "' + (text||'nothing') + '"' + (v===null?'  (not a valid number)':''));
+      let v = parseValue(text);
+      if ($('engine').value !== 'ocr' && v !== null && !r.trusted) v = null;
+      setRaw('raw: "' + (text||'nothing') + '"' + (v===null ? '  — skipped' : '') + ($('engine').value !== 'ocr' && r.votes ? '  (agree ' + r.votes + ')' : ''));
       if (v === null) { staleCheck(); return; }
       if (pending !== null && Math.abs(v - pending) < 0.01) pendingCount++; else { pending = v; pendingCount = 1; }
-      if (pendingCount >= Math.max(1, +$('confirm').value||3)) accept(v);
+      let need = Math.max(1, +$('confirm').value||3);
+      if (confirmed !== null && Math.abs(v - confirmed) > 3) need *= 3;   // big jumps need extra proof
+      if (pendingCount >= need) accept(v);
       else staleCheck();
     }catch(e){ setRaw('error: '+e.message); }
     finally{ busy=false; }
   }
   function parseValue(text){
-    if (text.includes('?')) return null; // a digit couldn't be read — don't trust a partial number
+    if (!text || text.includes('?')) return null; // a digit couldn't be read — don't trust a partial number
     const m = text.match(/-?\d+(\.\d+)?/); if (!m) return null;
     let s = m[0];
     const dec = $('decimals').value;
@@ -416,6 +578,8 @@
       const n = +dec; if (digits.length <= n) return null;
       s = (neg?'-':'') + (n ? digits.slice(0,-n)+'.'+digits.slice(-n) : digits);
     }
+    const intDigits = s.replace('-','').split('.')[0].length;
+    if (intDigits < (+$('minDigits').value||1)) return null;
     const v = parseFloat(s);
     if (!isFinite(v) || v < +$('minV').value || v > +$('maxV').value) return null;
     return v;
@@ -483,19 +647,18 @@
   function setStatus(cls, msg){ const s=$('status'); s.className='status '+cls; s.textContent=msg; }
   function setRaw(t){ $('raw').textContent = t; }
   function log(msg){ const el=$('log'); const d=document.createElement('div'); d.textContent = new Date().toLocaleTimeString()+'  '+msg; el.prepend(d); while(el.children.length>100) el.lastChild.remove(); }
-  function drawDebug(o){
-    const {bin,W,H} = o;
+  function drawDebug(r){
+    const {clean,W,H,boxes} = r;
     debug.width = W; debug.height = H;
     const img = dctx.createImageData(W,H);
-    for (let i=0;i<bin.length;i++){ const c = bin[i]?255:0; img.data[i*4]=c; img.data[i*4+1]=c; img.data[i*4+2]=c; img.data[i*4+3]=255; }
+    for (let i=0;i<clean.length;i++){ const c = clean[i]?255:0; img.data[i*4]=c; img.data[i*4+1]=c; img.data[i*4+2]=c; img.data[i*4+3]=255; }
     dctx.putImageData(img,0,0);
-  }
-  function drawBoxes(o, boxes){
-    dctx.lineWidth = 1; dctx.font = 'bold 14px system-ui';
+    if ($('engine').value === 'ocr') return;
+    dctx.lineWidth = 2; dctx.font = 'bold 18px system-ui';
     boxes.forEach(b => {
-      dctx.strokeStyle = b.ch==='?' ? '#ff4d5e' : '#3ecf8e';
-      dctx.strokeRect(b.x0+.5,b.y0+.5,b.w-1,b.h-1);
-      dctx.fillStyle = dctx.strokeStyle; dctx.fillText(b.ch, b.x0+2, Math.max(12,b.y0-2));
+      dctx.strokeStyle = !b.used ? '#555' : b.ch.includes('?') ? '#ff4d5e' : '#3ecf8e';
+      dctx.strokeRect(b.x0-1,b.y0-1,b.w+2,b.h+2);
+      if (b.used){ dctx.fillStyle = dctx.strokeStyle; dctx.fillText(b.ch.replace('.',''), b.x0+2, Math.max(16,b.y0-3)); }
     });
   }
   function drawSpark(){
@@ -509,8 +672,7 @@
     history.forEach((h,i)=> i? x.lineTo(X(i),Y(h.v)) : x.moveTo(X(i),Y(h.v))); x.stroke();
   }
 
-  // expose decoder for testing
-  window.__thermo = { decodeSeg, parseValue };
+  window.__thermo = { parseValue, grab, decode, inkMap, get roi(){return roi;} };
   listCams();
 })();
 </script>

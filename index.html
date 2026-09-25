@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>Thermo Watch</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --text:#e8eaf0; --muted:#9aa1b1;
+    --accent:#4da3ff; --ok:#3ecf8e; --warn:#ffb020; --bad:#ff4d5e;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  body.alarm{animation:flash 1s steps(2) infinite}
+  @keyframes flash{0%{background:#3a0b12}50%{background:var(--bg)}}
+  main{max-width:900px;margin:0 auto;padding:16px}
+  h1{font-size:22px;margin:4px 0 2px}
+  .sub{color:var(--muted);margin:0 0 14px;font-size:14px}
+  .grid{display:grid;gap:14px;grid-template-columns:1fr}
+  @media(min-width:820px){.grid{grid-template-columns:1.4fr 1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+  .stage{position:relative;width:100%;background:#000;border-radius:10px;overflow:hidden;touch-action:none;min-height:180px}
+  video{display:block;width:100%;height:auto}
+  #overlay{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+  .placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);text-align:center;padding:20px}
+  .hint{color:var(--muted);font-size:13px;margin:8px 0 0}
+  .reading{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .big{font-size:64px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1}
+  .unit{font-size:22px;color:var(--muted)}
+  .status{margin-top:8px;padding:8px 10px;border-radius:8px;font-weight:600;background:#20242d}
+  .status.ok{color:var(--ok)} .status.bad{color:#fff;background:var(--bad)} .status.idle{color:var(--muted)}
+  .raw{color:var(--muted);font-size:13px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}
+  label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+  input[type=number],select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:#0f1115;color:var(--text);font-size:15px}
+  input[type=range]{width:100%}
+  .row{display:flex;gap:10px}
+  .row>*{flex:1}
+  button{appearance:none;border:0;border-radius:10px;padding:11px 14px;font-weight:600;font-size:15px;cursor:pointer;background:#262b36;color:var(--text)}
+  button.primary{background:var(--accent);color:#04121f}
+  button.danger{background:var(--bad);color:#fff}
+  button:disabled{opacity:.5;cursor:default}
+  .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .check{display:flex;align-items:center;gap:8px;color:var(--text);font-size:14px;margin-top:10px}
+  #debug{width:100%;image-rendering:pixelated;background:#000;border-radius:8px;margin-top:6px;display:block}
+  #spark{width:100%;height:70px;display:block;margin-top:8px}
+  details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:4px}
+  .log{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted);max-height:140px;overflow:auto;margin-top:6px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Thermo Watch</h1>
+  <p class="sub">Point your camera at a digital thermometer. It reads the number and beeps when the temperature crosses your limit.</p>
+
+  <div class="grid">
+    <section class="card">
+      <div class="stage" id="stage">
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="overlay"></canvas>
+        <div class="placeholder" id="ph">Tap <b>&nbsp;Start camera&nbsp;</b> below</div>
+      </div>
+      <p class="hint">Drag a box tightly around the <b>temperature digits only</b> (inside the screen, not the plastic edge). Hold the phone steady and avoid glare.</p>
+      <div class="btns">
+        <button class="primary" id="startBtn">Start camera</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <select id="camSel" style="flex:1;min-width:140px" aria-label="Camera"></select>
+      </div>
+      <label>What the app sees (after cleanup)</label>
+      <canvas id="debug" width="320" height="80"></canvas>
+    </section>
+
+    <section class="card">
+      <div class="reading"><span class="big" id="val">--</span><span class="unit" id="unitLbl">°</span></div>
+      <div class="status idle" id="status">Not watching yet</div>
+      <div class="raw" id="raw">raw: —</div>
+      <canvas id="spark"></canvas>
+
+      <div class="row">
+        <div>
+          <label for="limit">Alarm limit</label>
+          <input type="number" id="limit" value="68" step="0.5">
+        </div>
+        <div>
+          <label for="dir">Beep when</label>
+          <select id="dir"><option value="below">below limit</option><option value="above">above limit</option></select>
+        </div>
+      </div>
+
+      <div class="btns">
+        <button id="testBtn">Test beep</button>
+        <button id="silenceBtn" class="danger" disabled>Silence 5 min</button>
+      </div>
+      <label class="check"><input type="checkbox" id="soundOn" checked> Sound on</label>
+
+      <details>
+        <summary>Reading settings (open if numbers are wrong)</summary>
+        <label for="engine">Reader</label>
+        <select id="engine">
+          <option value="seg">7-segment decoder (best for LCD digits)</option>
+          <option value="ocr">General OCR (Tesseract)</option>
+        </select>
+        <label for="polarity">Digit colour</label>
+        <select id="polarity">
+          <option value="auto">Auto</option>
+          <option value="dark">Dark digits on light screen (LCD)</option>
+          <option value="light">Light digits on dark screen (LED / backlit)</option>
+        </select>
+        <label for="thr">Contrast threshold: <span id="thrV">auto</span></label>
+        <input type="range" id="thr" min="0" max="250" value="0">
+        <label for="slant">Digit slant correction: <span id="slantV">0°</span></label>
+        <input type="range" id="slant" min="-5" max="20" value="0">
+        <label for="decimals">Decimal places on display</label>
+        <select id="decimals">
+          <option value="auto">Auto (use detected dot)</option>
+          <option value="0">0 (e.g. 68)</option>
+          <option value="1">1 (e.g. 68.4)</option>
+        </select>
+        <div class="row">
+          <div>
+            <label for="confirm">Matching reads needed</label>
+            <input type="number" id="confirm" value="3" min="1" max="10">
+          </div>
+          <div>
+            <label for="fps">Reads per second</label>
+            <input type="number" id="fps" value="4" min="1" max="10">
+          </div>
+        </div>
+        <div class="row">
+          <div><label for="minV">Ignore readings below</label><input type="number" id="minV" value="-40"></div>
+          <div><label for="maxV">Ignore readings above</label><input type="number" id="maxV" value="150"></div>
+        </div>
+      </details>
+
+      <details>
+        <summary>Log</summary>
+        <div class="log" id="log"></div>
+      </details>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
+  const debug = $('debug'), dctx = debug.getContext('2d');
+  const work = document.createElement('canvas'), wctx = work.getContext('2d', { willReadFrequently: true });
+
+  // ---------- settings persistence ----------
+  const KEYS = ['limit','dir','engine','polarity','thr','slant','decimals','confirm','fps','minV','maxV','soundOn'];
+  function loadSettings(){
+    try{
+      const s = JSON.parse(localStorage.getItem('thermo-settings')||'{}');
+      KEYS.forEach(k => { if (s[k]!==undefined){ const el=$(k); if(el.type==='checkbox') el.checked=s[k]; else el.value=s[k]; }});
+      if (s.roi) roi = s.roi;
+    }catch(e){}
+  }
+  function saveSettings(){
+    try{
+      const s = {roi};
+      KEYS.forEach(k => { const el=$(k); s[k] = el.type==='checkbox' ? el.checked : el.value; });
+      localStorage.setItem('thermo-settings', JSON.stringify(s));
+    }catch(e){}
+  }
+
+  // ---------- region of interest ----------
+  let roi = {x:0.3, y:0.35, w:0.4, h:0.3}; // normalized to video frame
+  let drag = null;
+  loadSettings();
+  KEYS.forEach(k => $(k).addEventListener('change', () => { saveSettings(); updateLabels(); }));
+  ['thr','slant'].forEach(k => $(k).addEventListener('input', updateLabels));
+  function updateLabels(){
+    $('thrV').textContent = +$('thr').value === 0 ? 'auto' : $('thr').value;
+    $('slantV').textContent = $('slant').value + '°';
+  }
+  updateLabels();
+
+  function sizeOverlay(){
+    const r = overlay.getBoundingClientRect();
+    overlay.width = r.width * devicePixelRatio; overlay.height = r.height * devicePixelRatio;
+    drawOverlay();
+  }
+  function drawOverlay(){
+    const W = overlay.width, H = overlay.height;
+    octx.clearRect(0,0,W,H);
+    if (!stream) return;
+    const x=roi.x*W, y=roi.y*H, w=roi.w*W, h=roi.h*H;
+    octx.fillStyle='rgba(0,0,0,.45)';
+    octx.fillRect(0,0,W,y); octx.fillRect(0,y+h,W,H-y-h); octx.fillRect(0,y,x,h); octx.fillRect(x+w,y,W-x-w,h);
+    octx.strokeStyle = alarmOn ? '#ff4d5e' : '#4da3ff'; octx.lineWidth = 3*devicePixelRatio;
+    octx.strokeRect(x,y,w,h);
+  }
+  function pt(e){ const r=overlay.getBoundingClientRect(); return {x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)), y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))}; }
+  overlay.addEventListener('pointerdown', e => { if(!stream) return; overlay.setPointerCapture(e.pointerId); drag = pt(e); });
+  overlay.addEventListener('pointermove', e => {
+    if(!drag) return; const p = pt(e);
+    const nr = {x:Math.min(drag.x,p.x), y:Math.min(drag.y,p.y), w:Math.abs(p.x-drag.x), h:Math.abs(p.y-drag.y)};
+    if (nr.w>0.03 && nr.h>0.02){ roi = nr; drawOverlay(); }
+  });
+  overlay.addEventListener('pointerup', () => { if(drag){ drag=null; saveSettings(); resetConfirm(); } });
+  window.addEventListener('resize', sizeOverlay);
+
+  // ---------- camera ----------
+  let stream = null, timer = null, wakeLock = null;
+  async function listCams(){
+    try{
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
+      const sel = $('camSel'), cur = sel.value; sel.innerHTML='';
+      devs.forEach((d,i)=>{ const o=document.createElement('option'); o.value=d.deviceId; o.textContent=d.label||('Camera '+(i+1)); sel.appendChild(o); });
+      if (cur) sel.value = cur;
+      else { const back = devs.find(d=>/back|rear|environment/i.test(d.label)); if(back) sel.value = back.deviceId; }
+    }catch(e){}
+  }
+  async function startCam(deviceId){
+    stopCam(true);
+    unlockAudio();
+    try{
+      const v = deviceId ? {deviceId:{exact:deviceId}} : {facingMode:{ideal:'environment'}};
+      stream = await navigator.mediaDevices.getUserMedia({video:{...v, width:{ideal:1280}, height:{ideal:720}}, audio:false});
+    }catch(err){
+      setStatus('idle', 'Camera blocked: ' + err.message + '. Allow camera access and try again.');
+      return;
+    }
+    video.srcObject = stream; await video.play().catch(()=>{});
+    $('ph').style.display='none';
+    $('startBtn').disabled = true; $('stopBtn').disabled = false;
+    await listCams();
+    const track = stream.getVideoTracks()[0]; const st = track.getSettings && track.getSettings();
+    if (st && st.deviceId) $('camSel').value = st.deviceId;
+    setTimeout(sizeOverlay, 300);
+    try{ if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){}
+    setStatus('idle','Watching… adjust the box around the digits');
+    schedule();
+  }
+  function stopCam(silent){
+    clearTimeout(timer); timer=null;
+    if (stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+    video.srcObject = null;
+    $('startBtn').disabled = false; $('stopBtn').disabled = true;
+    if(!silent){ $('ph').style.display='flex'; setStatus('idle','Stopped'); setAlarm(false); }
+    try{ wakeLock && wakeLock.release(); }catch(e){} wakeLock=null;
+    drawOverlay();
+  }
+  $('startBtn').onclick = () => startCam($('camSel').value || null);
+  $('stopBtn').onclick = () => stopCam(false);
+  $('camSel').onchange = () => { if (stream) startCam($('camSel').value); };
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState==='visible' && stream && !wakeLock && 'wakeLock' in navigator){ try{ wakeLock = await navigator.wakeLock.request('screen'); }catch(e){} }
+  });
+
+  function schedule(){
+    clearTimeout(timer);
+    const fps = Math.min(10, Math.max(1, +$('fps').value || 4));
+    timer = setTimeout(async () => { await tick(); if (stream) schedule(); }, 1000/fps);
+  }
+
+  // ---------- image processing ----------
+  function grabBinary(){
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    const sx = roi.x*vw, sy = roi.y*vh, sw = roi.w*vw, sh = roi.h*vh;
+    const H = 96, W = Math.max(24, Math.round(H * sw/sh));
+    work.width = W; work.height = H;
+    const k = Math.tan((+$('slant').value) * Math.PI/180);
+    wctx.setTransform(1,0,k,1,-k*H/2,0);
+    wctx.fillStyle = '#888'; wctx.fillRect(-W,0,W*3,H);
+    wctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
+    wctx.setTransform(1,0,0,1,0,0);
+    const img = wctx.getImageData(0,0,W,H), d = img.data;
+    const g = new Uint8Array(W*H);
+    for (let i=0,j=0;i<d.length;i+=4,j++) g[j] = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)|0;
+    // light blur (box 3x3) to reduce noise
+    const b = new Uint8Array(W*H);
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+      let s=0,n=0;
+      for (let dy=-1;dy<=1;dy++){ const yy=y+dy; if(yy<0||yy>=H) continue;
+        for (let dx=-1;dx<=1;dx++){ const xx=x+dx; if(xx<0||xx>=W) continue; s+=g[yy*W+xx]; n++; } }
+      b[y*W+x] = s/n;
+    }
+    let t = +$('thr').value;
+    if (!t) t = otsu(b);
+    let pol = $('polarity').value;
+    let darkCount = 0; for (let i=0;i<b.length;i++) if (b[i] < t) darkCount++;
+    if (pol==='auto') pol = darkCount <= b.length/2 ? 'dark' : 'light';
+    const bin = new Uint8Array(W*H);
+    for (let i=0;i<b.length;i++) bin[i] = pol==='dark' ? (b[i] < t ? 1:0) : (b[i] >= t ? 1:0);
+    // clear a thin border so the display frame doesn't count as a digit
+    const m = 2;
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++) if (x<m||y<m||x>=W-m||y>=H-m) bin[y*W+x]=0;
+    return {bin, W, H, t, pol};
+  }
+  function otsu(px){
+    const hist = new Array(256).fill(0); px.forEach(v=>hist[v]++);
+    const total = px.length; let sum=0; for(let i=0;i<256;i++) sum+=i*hist[i];
+    let sumB=0,wB=0,max=0,thr=127;
+    for (let i=0;i<256;i++){
+      wB+=hist[i]; if(!wB) continue; const wF=total-wB; if(!wF) break;
+      sumB+=i*hist[i]; const mB=sumB/wB, mF=(sum-sumB)/wF; const between=wB*wF*(mB-mF)*(mB-mF);
+      if (between>max){max=between;thr=i;}
+    }
+    return thr;
+  }
+
+  // 7-segment patterns: bits a b c d e f g
+  const SEG = {
+    '1111110':'0','0110000':'1','1101101':'2','1111001':'3','0110011':'4','1011011':'5',
+    '1011111':'6','0011111':'6','1110000':'7','1110010':'7','1111111':'8','1111011':'9','1110011':'9',
+    '0000001':'-','1000111':'F','1001110':'C','1001111':'E','0001110':'L','1100111':'P'
+  };
+  const REG = { // x0,x1,y0,y1 as fractions of the digit box
+    a:[.3,.7,0,.16], b:[.68,1,.14,.44], c:[.68,1,.56,.86], d:[.3,.7,.84,1],
+    e:[0,.32,.56,.86], f:[0,.32,.14,.44], g:[.3,.7,.42,.58]
+  };
+  function decodeSeg(o){
+    const {bin, W, H} = o;
+    const col = new Array(W).fill(0);
+    for (let x=0;x<W;x++){ let s=0; for (let y=0;y<H;y++) s+=bin[y*W+x]; col[x]=s; }
+    const minCol = Math.max(1, H*0.03);
+    // runs of occupied columns, merged across small gaps
+    let runs=[], inR=false, s0=0;
+    for (let x=0;x<=W;x++){
+      const on = x<W && col[x]>=minCol;
+      if (on && !inR){ inR=true; s0=x; }
+      if (!on && inR){ inR=false; runs.push([s0,x-1]); }
+    }
+    const gap = Math.max(2, H*0.06);
+    const merged=[];
+    runs.forEach(r => { const L=merged[merged.length-1]; if (L && r[0]-L[1] <= gap) L[1]=r[1]; else merged.push([r[0],r[1]]); });
+    // vertical extents
+    const comps = merged.map(([x0,x1]) => {
+      const w = x1-x0+1; let y0=-1,y1=-1, px=0;
+      for (let y=0;y<H;y++){ let s=0; for (let x=x0;x<=x1;x++) s+=bin[y*W+x]; px+=s; if (s>=Math.max(1,w*0.08)){ if(y0<0) y0=y; y1=y; } }
+      return {x0,x1,y0,y1,w,h:y1-y0+1,px};
+    }).filter(c => c.y0>=0 && c.px > 6);
+    if (!comps.length) return {text:'', boxes:[]};
+    const digitH = Math.max(...comps.map(c=>c.h));
+    const bottom = Math.max(...comps.filter(c=>c.h>digitH*0.7).map(c=>c.y1));
+    let text='', boxes=[];
+    for (const c of comps){
+      let ch = '';
+      if (c.h >= digitH*0.7){
+        if (c.w/c.h < 0.33) ch = '1';
+        else {
+          let bits='';
+          for (const k of 'abcdefg'){
+            const [fx0,fx1,fy0,fy1]=REG[k];
+            const X0=Math.round(c.x0+fx0*c.w), X1=Math.max(X0+1,Math.round(c.x0+fx1*c.w));
+            const Y0=Math.round(c.y0+fy0*c.h), Y1=Math.max(Y0+1,Math.round(c.y0+fy1*c.h));
+            let on=0,n=0; for(let y=Y0;y<Y1&&y<H;y++) for(let x=X0;x<X1&&x<W;x++){ on+=bin[y*W+x]; n++; }
+            bits += (n && on/n > 0.3) ? '1':'0';
+          }
+          ch = SEG[bits] || '?';
+        }
+      } else if (c.h < digitH*0.3 && c.w < digitH*0.3 && c.y1 >= bottom - digitH*0.15) ch = '.';
+      else if (c.h < digitH*0.3 && c.w >= digitH*0.25 && Math.abs((c.y0+c.y1)/2 - (bottom-digitH/2)) < digitH*0.2) ch = '-';
+      else ch = ''; // degree sign, unit symbols, noise
+      if (ch){ text += ch; boxes.push({...c, ch}); }
+    }
+    return {text, boxes};
+  }
+
+  // ---------- OCR (lazy) ----------
+  let ocrWorker = null, ocrLoading = null;
+  function loadOCR(){
+    if (ocrLoading) return ocrLoading;
+    ocrLoading = new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      s.onload = async () => {
+        try{
+          ocrWorker = await Tesseract.createWorker('eng');
+          await ocrWorker.setParameters({ tessedit_char_whitelist:'0123456789.-', tessedit_pageseg_mode:'7' });
+          res();
+        }catch(e){ rej(e); }
+      };
+      s.onerror = () => rej(new Error('Could not load OCR library'));
+      document.head.appendChild(s);
+    });
+    return ocrLoading;
+  }
+
+  // ---------- main loop ----------
+  let busy=false, pending=null, pendingCount=0, confirmed=null, history=[];
+  function resetConfirm(){ pending=null; pendingCount=0; }
+  async function tick(){
+    if (busy || !stream) return; busy = true;
+    try{
+      const o = grabBinary(); if (!o) return;
+      drawDebug(o);
+      let text='';
+      if ($('engine').value === 'ocr'){
+        setRaw('loading OCR…');
+        await loadOCR();
+        const {data} = await ocrWorker.recognize(debug);
+        text = (data.text||'').replace(/\s+/g,'');
+      } else {
+        const r = decodeSeg(o); text = r.text; drawBoxes(o, r.boxes);
+      }
+      const v = parseValue(text);
+      setRaw('raw: "' + (text||'nothing') + '"' + (v===null?'  (not a valid number)':''));
+      if (v === null) { staleCheck(); return; }
+      if (pending !== null && Math.abs(v - pending) < 0.01) pendingCount++; else { pending = v; pendingCount = 1; }
+      if (pendingCount >= Math.max(1, +$('confirm').value||3)) accept(v);
+      else staleCheck();
+    }catch(e){ setRaw('error: '+e.message); }
+    finally{ busy=false; }
+  }
+  function parseValue(text){
+    if (text.includes('?')) return null; // a digit couldn't be read — don't trust a partial number
+    const m = text.match(/-?\d+(\.\d+)?/); if (!m) return null;
+    let s = m[0];
+    const dec = $('decimals').value;
+    if (dec !== 'auto'){
+      const digits = s.replace(/[^\d]/g,''); const neg = s.startsWith('-');
+      const n = +dec; if (digits.length <= n) return null;
+      s = (neg?'-':'') + (n ? digits.slice(0,-n)+'.'+digits.slice(-n) : digits);
+    }
+    const v = parseFloat(s);
+    if (!isFinite(v) || v < +$('minV').value || v > +$('maxV').value) return null;
+    return v;
+  }
+  let lastAccept = 0;
+  function accept(v){
+    lastAccept = Date.now();
+    if (confirmed !== v) log('Reading ' + v);
+    confirmed = v;
+    $('val').textContent = v;
+    history.push({t:Date.now(), v}); if (history.length>240) history.shift();
+    drawSpark();
+    evaluate();
+  }
+  function staleCheck(){
+    if (confirmed!==null && Date.now()-lastAccept > 15000){
+      if (!alarmOn) setStatus('idle', 'Can\'t read the display right now — last: ' + confirmed);
+    }
+  }
+  function evaluate(){
+    const lim = +$('limit').value, dir = $('dir').value;
+    const bad = dir==='below' ? confirmed < lim : confirmed > lim;
+    if (bad){ setStatus('bad', `⚠ ${confirmed} is ${dir} ${lim}!`); setAlarm(true); }
+    else { setStatus('ok', `OK — ${confirmed} (alarm if ${dir} ${lim})`); setAlarm(false); }
+  }
+  $('limit').addEventListener('input', () => { if (confirmed!==null) evaluate(); });
+  $('dir').addEventListener('change', () => { if (confirmed!==null) evaluate(); });
+
+  // ---------- alarm / audio ----------
+  let actx=null, alarmOn=false, beepTimer=null, silencedUntil=0;
+  function unlockAudio(){
+    try{ if(!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==='suspended') actx.resume(); }catch(e){}
+  }
+  function beep(times=3){
+    if (!$('soundOn').checked) return;
+    unlockAudio(); if (!actx) return;
+    const now = actx.currentTime;
+    for (let i=0;i<times;i++){
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type='square'; o.frequency.value = 1760;
+      g.gain.setValueAtTime(0.0001, now+i*0.28);
+      g.gain.exponentialRampToValueAtTime(0.35, now+i*0.28+0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, now+i*0.28+0.18);
+      o.connect(g).connect(actx.destination); o.start(now+i*0.28); o.stop(now+i*0.28+0.2);
+    }
+    try{ navigator.vibrate && navigator.vibrate([200,80,200,80,200]); }catch(e){}
+  }
+  function setAlarm(on){
+    if (on === alarmOn) return;
+    alarmOn = on;
+    document.body.classList.toggle('alarm', on && Date.now() > silencedUntil);
+    $('silenceBtn').disabled = !on;
+    clearInterval(beepTimer); beepTimer=null;
+    if (on){
+      log('ALARM: ' + confirmed);
+      const loop = () => { const quiet = Date.now() < silencedUntil; document.body.classList.toggle('alarm', !quiet); if (!quiet) beep(3); };
+      loop(); beepTimer = setInterval(loop, 2000);
+    } else { document.body.classList.remove('alarm'); }
+    drawOverlay();
+  }
+  $('testBtn').onclick = () => { unlockAudio(); beep(3); };
+  $('silenceBtn').onclick = () => { silencedUntil = Date.now() + 5*60*1000; document.body.classList.remove('alarm'); log('Silenced for 5 min'); };
+
+  // ---------- UI helpers ----------
+  function setStatus(cls, msg){ const s=$('status'); s.className='status '+cls; s.textContent=msg; }
+  function setRaw(t){ $('raw').textContent = t; }
+  function log(msg){ const el=$('log'); const d=document.createElement('div'); d.textContent = new Date().toLocaleTimeString()+'  '+msg; el.prepend(d); while(el.children.length>100) el.lastChild.remove(); }
+  function drawDebug(o){
+    const {bin,W,H} = o;
+    debug.width = W; debug.height = H;
+    const img = dctx.createImageData(W,H);
+    for (let i=0;i<bin.length;i++){ const c = bin[i]?255:0; img.data[i*4]=c; img.data[i*4+1]=c; img.data[i*4+2]=c; img.data[i*4+3]=255; }
+    dctx.putImageData(img,0,0);
+  }
+  function drawBoxes(o, boxes){
+    dctx.lineWidth = 1; dctx.font = 'bold 14px system-ui';
+    boxes.forEach(b => {
+      dctx.strokeStyle = b.ch==='?' ? '#ff4d5e' : '#3ecf8e';
+      dctx.strokeRect(b.x0+.5,b.y0+.5,b.w-1,b.h-1);
+      dctx.fillStyle = dctx.strokeStyle; dctx.fillText(b.ch, b.x0+2, Math.max(12,b.y0-2));
+    });
+  }
+  function drawSpark(){
+    const c=$('spark'), r=c.getBoundingClientRect(); c.width=r.width*devicePixelRatio; c.height=r.height*devicePixelRatio;
+    const x=c.getContext('2d'); if (history.length<2) return;
+    const vs = history.map(h=>h.v), lim=+$('limit').value;
+    let lo=Math.min(...vs,lim)-1, hi=Math.max(...vs,lim)+1;
+    const X=i=>i/(history.length-1)*c.width, Y=v=>c.height-(v-lo)/(hi-lo)*c.height;
+    x.strokeStyle='#ff4d5e'; x.setLineDash([6,6]); x.beginPath(); x.moveTo(0,Y(lim)); x.lineTo(c.width,Y(lim)); x.stroke(); x.setLineDash([]);
+    x.strokeStyle='#4da3ff'; x.lineWidth=2*devicePixelRatio; x.beginPath();
+    history.forEach((h,i)=> i? x.lineTo(X(i),Y(h.v)) : x.moveTo(X(i),Y(h.v))); x.stroke();
+  }
+
+  // expose decoder for testing
+  window.__thermo = { decodeSeg, parseValue };
+  listCams();
+})();
+</script>
+</body>
+</html>

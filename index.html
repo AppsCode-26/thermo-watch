@@ -91,7 +91,9 @@
         <button id="testBtn">Test beep</button>
         <button id="silenceBtn" class="danger" disabled>Silence 5 min</button>
       </div>
+      <div class="hint" id="soundMsg"></div>
       <label class="check"><input type="checkbox" id="soundOn" checked> Sound on</label>
+      <p class="hint">No sound on iPhone/iPad? Turn the volume up (side buttons) and make sure the tab isn't muted. Tap <b>Test beep</b> once after opening the page.</p>
 
       <details>
         <summary>Reading settings (open if numbers are wrong)</summary>
@@ -609,13 +611,38 @@
   $('dir').addEventListener('change', () => { if (confirmed!==null) evaluate(); });
 
   // ---------- alarm / audio ----------
-  let actx=null, alarmOn=false, beepTimer=null, silencedUntil=0;
-  function unlockAudio(){
-    try{ if(!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==='suspended') actx.resume(); }catch(e){}
+  let actx=null, alarmOn=false, beepTimer=null, silencedUntil=0, beepEl=null, audioOk=false;
+  // iPhone/iPad: Web Audio is muted by the silent switch / Silent Mode, so play a real audio file instead,
+  // and ask Safari to treat this page's sound like media playback.
+  function makeBeepWav(){
+    const rate=22050, beeps=3, on=0.18, gap=0.1, len=Math.round(rate*(beeps*(on+gap)));
+    const data=new Int16Array(len);
+    for (let i=0;i<len;i++){ const t=i/rate, p=t%(on+gap);
+      if (p<on){ const env=Math.min(1,p/0.005,(on-p)/0.01); data[i]=Math.round(Math.sign(Math.sin(2*Math.PI*1760*t))*env*0.6*32767); } }
+    const buf=new ArrayBuffer(44+len*2), v=new DataView(buf);
+    const w=(o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i,s.charCodeAt(i)); };
+    w(0,'RIFF'); v.setUint32(4,36+len*2,true); w(8,'WAVE'); w(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true); w(36,'data'); v.setUint32(40,len*2,true);
+    new Int16Array(buf,44).set(data);
+    return URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
   }
-  function beep(times=3){
-    if (!$('soundOn').checked) return;
-    unlockAudio(); if (!actx) return;
+  function soundMsg(t){ const el=$('soundMsg'); if (el) el.textContent=t||''; }
+  function unlockAudio(silentPrime=true){
+    try{ if (navigator.audioSession) navigator.audioSession.type = 'playback'; }catch(e){}
+    try{
+      if (!beepEl){ beepEl = new Audio(makeBeepWav()); beepEl.preload='auto'; beepEl.setAttribute('playsinline',''); }
+      if (!audioOk && silentPrime){ // must happen inside a tap: play silently once so later alarms are allowed to play
+        beepEl.muted = true;
+        const pr = beepEl.play();
+        const done = () => { if (beepEl.muted){ beepEl.pause(); beepEl.currentTime=0; beepEl.muted=false; } };
+        if (pr && pr.then) pr.then(()=>{ audioOk=true; done(); soundMsg(''); }).catch(()=>{ done(); }); else { audioOk=true; done(); }
+      }
+    }catch(e){}
+    try{ if(!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); if(actx.state!=='running') actx.resume(); }catch(e){}
+  }
+  function beepWebAudio(times){
+    if (!actx) return;
+    if (actx.state!=='running') actx.resume();
     const now = actx.currentTime;
     for (let i=0;i<times;i++){
       const o = actx.createOscillator(), g = actx.createGain();
@@ -625,7 +652,16 @@
       g.gain.exponentialRampToValueAtTime(0.0001, now+i*0.28+0.18);
       o.connect(g).connect(actx.destination); o.start(now+i*0.28); o.stop(now+i*0.28+0.2);
     }
+  }
+  function beep(times=3){
+    if (!$('soundOn').checked) return;
     try{ navigator.vibrate && navigator.vibrate([200,80,200,80,200]); }catch(e){}
+    if (!beepEl) unlockAudio(false);
+    try{
+      beepEl.muted=false; beepEl.volume=1; beepEl.currentTime=0;
+      const pr = beepEl.play();
+      if (pr && pr.catch) pr.then(()=>soundMsg('')).catch(() => { beepWebAudio(times); soundMsg('🔇 Sound is blocked — tap "Test beep" once to allow it.'); });
+    }catch(e){ beepWebAudio(times); }
   }
   function setAlarm(on){
     if (on === alarmOn) return;
@@ -640,7 +676,8 @@
     } else { document.body.classList.remove('alarm'); }
     drawOverlay();
   }
-  $('testBtn').onclick = () => { unlockAudio(); beep(3); };
+  $('testBtn').onclick = () => { unlockAudio(false); audioOk = true; beep(3); };
+  document.addEventListener('pointerdown', () => { if (!audioOk) unlockAudio(); }, {capture:true});
   $('silenceBtn').onclick = () => { silencedUntil = Date.now() + 5*60*1000; document.body.classList.remove('alarm'); log('Silenced for 5 min'); };
 
   // ---------- UI helpers ----------
